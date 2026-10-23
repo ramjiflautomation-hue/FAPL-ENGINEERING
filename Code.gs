@@ -49,14 +49,18 @@ function doGet() {
     .setTitle("Material Request Dashboard");
 }
 
-// =========================================================
 // SUBMIT MATERIAL REQUEST
-// =========================================================
-
-
 function submitRequest(data) {
+  const session = requirePortalPermission_(
+    data && data.sessionId,
+    "spareParts",
+    "create"
+  );
+
   try {
-    const portalRequestType = String(data && data.requestType || "New Material").trim();
+    const portalRequestType = String(
+      data && data.requestType || "New Material"
+    ).trim();
     const isNewSpareRequest = portalRequestType === "New Spare Request";
 
     if (!data || !data.email || !data.name || !data.mobile || !data.stationId ||
@@ -403,6 +407,8 @@ function submitBreakdownFromMaterialRequest_legacyAdapter_(data, d) {
 }
 
 function submitBreakdownFromMaterialRequest(data) {
+  const session = requirePortalPermission_(data && data.sessionId, "maintenance", "create");
+
   try {
     data = data || {};
     const email = String(data.email || "").trim();
@@ -488,6 +494,8 @@ function submitBreakdownFromMaterialRequest(data) {
 }
 
 function submitConsumedSpareDetails(data) {
+  const session = requirePortalPermission_(data && data.sessionId, "spareParts", "create");
+
   try {
     data = data || {};
     const email = String(data.email || "").trim();
@@ -524,7 +532,7 @@ function submitConsumedSpareDetails(data) {
 
 function sendBreakdownSubmissionMail_(data, hours, expectedTpt, actualTpt, tptLoss, spareIds, orderSpare, requestId) {
   try {
-    const recipients = getConfiguredEmailRecipients_();
+    const recipients = getConfiguredEmailRecipients_("problemObservation");
     if (!recipients.to.length) return;
     const subject = "Breakdown Submitted - Ticket ID: " + String(data.ticketId || "").trim();
     const html = "<div style='font-family:Calibri,Arial,sans-serif;font-size:14px;'><h2 style='color:#1F4E79;'>Breakdown Submission</h2>" +
@@ -548,7 +556,7 @@ function sendBreakdownSubmissionMail_(data, hours, expectedTpt, actualTpt, tptLo
 
 function sendNewMaterialRequestMail_(email,name,mobile,ticketId,requestType,items,requestId) {
   try {
-    const recipients = getConfiguredEmailRecipients_();
+    const recipients = getConfiguredEmailRecipients_("newMaterialRequest");
     if (!recipients.to.length) return;
     let rows=""; (items||[]).forEach(function(item,i){rows += "<tr><td style='padding:8px;border:1px solid #ddd;'>"+(i+1)+"</td><td style='padding:8px;border:1px solid #ddd;'>"+escapeHtml(item.itemId)+"</td><td style='padding:8px;border:1px solid #ddd;'>"+Number(item.qty)+"</td></tr>";});
     const subject="Material Request - "+requestType+" - Ref: "+String(ticketId||requestId);
@@ -938,7 +946,7 @@ function sendStatusUpdateReply_(sheet, row, oldStatusFromEvent) {
     "</div>";
 
   try {
-    const recipients = getConfiguredEmailRecipients_();
+    const recipients = getConfiguredEmailRecipients_("materialRequestStatus");
     if (!recipients.to.length) {
       Logger.log("No To recipients configured in Mail ID's sheet.");
       return;
@@ -1838,20 +1846,73 @@ function getDashboardData(fromDate,toDate,fromTime,toTime){
 // =========================================================
 
 
-function getConfiguredEmailRecipients_() {
+// =========================================================
+// ACTIVITY-WISE EMAIL ROUTING (Settings -> Email Notifications)
+// Stored in Script Properties so the existing Mail ID's sheet stays compatible.
+// =========================================================
+const NOTIFICATION_CONFIG_KEY_ = "FALCON_ACTIVITY_NOTIFICATION_CONFIG_V1";
+const NOTIFICATION_ACTIVITY_DEFAULTS_ = {
+  newMaterialRequest: {label:"New Material Request", enabled:true, mode:"external", internalEmails:"", externalEmails:""},
+  materialRequestStatus: {label:"Material Request Status", enabled:true, mode:"external", internalEmails:"", externalEmails:""},
+  receivedSpare: {label:"Received Spare Update", enabled:true, mode:"external", internalEmails:"", externalEmails:""},
+  pvcBelt: {label:"PVC Belt Received / Consumed", enabled:true, mode:"external", internalEmails:"", externalEmails:""},
+  pmWork: {label:"PM Work (legacy combined)", enabled:true, mode:"both", internalEmails:"", externalEmails:""},
+  pmWorkCompleted: {label:"PM Work Completed", enabled:true, mode:"both", internalEmails:"", externalEmails:""},
+  pmWorkOpen: {label:"PM Work Open / Pending", enabled:true, mode:"both", internalEmails:"", externalEmails:""},
+  pmWorkOverdue: {label:"PM Work Overdue", enabled:true, mode:"both", internalEmails:"", externalEmails:""},
+  problemObservation: {label:"Problem Observation", enabled:true, mode:"external", internalEmails:"", externalEmails:""},
+  scheduledDowntime: {label:"Scheduled Downtime Activities", enabled:true, mode:"external", internalEmails:"", externalEmails:""},
+  shiftRoster: {label:"Shift Roster Changes", enabled:true, mode:"both", internalEmails:"", externalEmails:""}
+};
+function getActivityNotificationConfig_(sessionId) {
+  if (sessionId) requireAdminSession_(sessionId);
+  const saved = PropertiesService.getScriptProperties().getProperty(NOTIFICATION_CONFIG_KEY_);
+  let parsed = {};
+  try { parsed = saved ? JSON.parse(saved) : {}; } catch (e) { parsed = {}; }
+  const result = {};
+  Object.keys(NOTIFICATION_ACTIVITY_DEFAULTS_).forEach(function(key) {
+    result[key] = Object.assign({}, NOTIFICATION_ACTIVITY_DEFAULTS_[key], parsed[key] || {});
+  });
+  return result;
+}
+function saveActivityNotificationConfig(sessionId, config) {
+  requireAdminSession_(sessionId);
+  if (!config || typeof config !== "object") throw new Error("Notification configuration missing.");
+  const cleaned = {};
+  Object.keys(NOTIFICATION_ACTIVITY_DEFAULTS_).forEach(function(key) {
+    const d = NOTIFICATION_ACTIVITY_DEFAULTS_[key];
+    const x = config[key] || {};
+    const mode = ["off","internal","external","both"].indexOf(String(x.mode || d.mode).toLowerCase()) >= 0 ? String(x.mode || d.mode).toLowerCase() : d.mode;
+    const internalEmails = parseEmailList_(x.internalEmails || "");
+    const externalEmails = parseEmailList_(x.externalEmails || "");
+    internalEmails.concat(externalEmails).forEach(function(email) { if (!isValidEmail_(email)) throw new Error("Invalid email address: " + email); });
+    cleaned[key] = {label:d.label, enabled:x.enabled === true || String(x.enabled) === "true", mode:mode, internalEmails:internalEmails.join(","), externalEmails:externalEmails.join(",")};
+  });
+  PropertiesService.getScriptProperties().setProperty(NOTIFICATION_CONFIG_KEY_, JSON.stringify(cleaned));
+  return {success:true, message:"Activity-wise email preferences saved."};
+}
+function getConfiguredEmailRecipients_(activityKey) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const emailSheet = ss.getSheetByName(EMAIL_SHEET_NAME);
-  if (!emailSheet || emailSheet.getLastRow() < 2) return { to: [], cc: [] };
-  const rows = emailSheet.getRange(2, 2, emailSheet.getLastRow() - 1, 2).getValues();
-  const to = [], cc = [];
-  rows.forEach(function(r) {
-    const a = String(r[0] || "").trim();
-    const b = String(r[1] || "").trim();
-    if (a) to.push(a);
-    if (b) cc.push(b);
-  });
-  return { to: [...new Set(to)], cc: [...new Set(cc)] };
+  let legacyTo = [], legacyCc = [];
+  if (emailSheet && emailSheet.getLastRow() >= 2) {
+    const rows = emailSheet.getRange(2, 2, emailSheet.getLastRow() - 1, 2).getValues();
+    rows.forEach(function(r) { const a=String(r[0]||"").trim(); const b=String(r[1]||"").trim(); if(a)legacyTo.push(a); if(b)legacyCc.push(b); });
+  }
+  // Calls without a key preserve legacy routing until mapped to a specific event.
+  if (!activityKey || !NOTIFICATION_ACTIVITY_DEFAULTS_[activityKey]) return {to:[...new Set(legacyTo)],cc:[...new Set(legacyCc)]};
+  const cfg = getActivityNotificationConfig_()[activityKey];
+  if (!cfg || !cfg.enabled || cfg.mode === "off") return {to:[],cc:[]};
+  const internal = parseEmailList_(cfg.internalEmails || "");
+  const external = parseEmailList_(cfg.externalEmails || "");
+  const to = [];
+  if (cfg.mode === "internal" || cfg.mode === "both") to.push.apply(to, internal);
+  if (cfg.mode === "external" || cfg.mode === "both") to.push.apply(to, external.length ? external : legacyTo);
+  const cc = (cfg.mode === "external" || cfg.mode === "both") ? legacyCc : [];
+  return {to:[...new Set(to)],cc:[...new Set(cc.filter(function(e){return to.indexOf(e)<0;}))]};
 }
+
+
 
 function responsiblePersonForDepartment_(department) {
   const d = String(department || "").trim().toLowerCase();
@@ -1908,6 +1969,8 @@ function saveCompletedReceivedSpare_(sheet, rowNumber, receivedData, materialTyp
 }
 
 function updateDashboardRequest(sessionId, ticketId, itemId, status, remark, rowNumber, materialType, receivedData) {
+  requirePortalPermission_(sessionId, "spareParts", "approveReject");
+
   const session = validateSession_(sessionId);
   if (!session) return { success: false, message: "Session expired. Please login again." };
 
@@ -2089,6 +2152,8 @@ function closeDashboardRequest(
   remark,
   rowNumber
 ) {
+  requirePortalPermission_(sessionId, "spareParts", "delete");
+
   return updateDashboardRequest(
     sessionId,
     ticketId,
@@ -2811,7 +2876,8 @@ function getSettings(sessionId) {
       [...new Set(toEmails)],
 
     ccEmails:
-      [...new Set(ccEmails)]
+      [...new Set(ccEmails)],
+    notificationConfig: getActivityNotificationConfig_()
   };
 }
 
@@ -2919,6 +2985,8 @@ function saveSettings(sessionId, data) {
         output
       );
   }
+
+  if (data.notificationConfig) saveActivityNotificationConfig(sessionId, data.notificationConfig);
 
   return {
     success: true,
@@ -4354,6 +4422,8 @@ function sanitizeFileName_(name) {
 }
 
 function saveProblemObservation(formObject) {
+  requirePortalPermission_(String(formObject && formObject.sessionId || ""), "maintenance", "create");
+
   try {
     if (!formObject) return { success: false, message: "Observation form data is required." };
 
@@ -4477,26 +4547,14 @@ function saveProblemObservation(formObject) {
       ""
     ]);
 
-    // Route raised observations only by Problem Category.
-    if (category.toLowerCase() === "mechanical") {
-      GmailApp.sendEmail(
-        "Palagani.Raghava@falconautotech.com",
-        "Problem Observation - Mechanical - " + generatedTicketId,
-        "A Mechanical problem observation has been raised. Ticket ID: " + generatedTicketId,
-        {
-          htmlBody: buildProblemObservationMailHtml_(generatedTicketId, session, stationId, category, title, observation, priority, mediaUrl)
-        }
-      );
-    } else if (category.toLowerCase() === "electrical") {
-      GmailApp.sendEmail(
-        "Ramji.Vishwakarma@falconautotech.com",
-        "Problem Observation - Electrical - " + generatedTicketId,
-        "An Electrical problem observation has been raised. Ticket ID: " + generatedTicketId,
-        {
-          htmlBody: buildProblemObservationMailHtml_(generatedTicketId, session, stationId, category, title, observation, priority, mediaUrl)
-        }
-      );
-    }
+    // Route observation notifications through activity-wise settings.
+    try {
+      sendConfiguredPortalNotice_("problemObservation","Problem Observation - " + generatedTicketId,
+        "A new problem observation has been raised. Ticket ID: " + generatedTicketId +
+        ". Category: " + category + ". Title: " + title + ". Priority: " + priority +
+        ". Raised by: " + String(session.name || session.email) + ". Details: " + observation +
+        ". Media: " + mediaUrl);
+    } catch (mailError) { Logger.log("Problem observation notification failed: " + mailError.message); }
 
     return {
       success: true,
@@ -4590,9 +4648,7 @@ function updateProblemObservation(sessionId, observationId, status, remark) {
   const session = validateSession_(sessionId);
   if (!session) return { success: false, message: "Session expired. Please login again." };
 
-  if (String(session.role || "").trim().toLowerCase() !== "admin") {
-    return { success: false, message: "Admin access required." };
-  }
+  if (!hasPortalPermission_(session, "maintenance", "edit")) return { success:false, message:"Access denied: maintenance edit permission is not enabled." };
 
   observationId = String(observationId || "").trim();
   status = String(status || "").trim();
@@ -4635,6 +4691,7 @@ function updateProblemObservation(sessionId, observationId, status, remark) {
   sheet.getRange(matchedRow, 18).setValue(String(session.email || "").trim());
   sheet.getRange(matchedRow, 19).setValue(now);
   SpreadsheetApp.flush();
+  try { sendConfiguredPortalNotice_("problemObservation","Problem Observation Status Update - "+observationId,"Problem observation "+observationId+" status changed to "+status+" by "+String(session.name||session.email)+". Remark: "+remark); } catch(mailError) { Logger.log("Problem observation status notification failed: "+mailError.message); }
 
   return {
     success: true,
@@ -4907,6 +4964,8 @@ function ensureReceivedSpareSheet_(){
 }
 
 function saveReceivedSpare(sessionId,data){
+  requirePortalPermission_(sessionId, "spareParts", "create");
+
   const s=validateSession_(sessionId);
   if(!s)return{success:false,message:"Session expired. Please login again."};
   data=data||{};
@@ -4960,6 +5019,7 @@ function saveReceivedSpare(sessionId,data){
   ];});
   sh.getRange(sh.getLastRow()+1,1,rows.length,20).setValues(rows);
   SpreadsheetApp.flush();
+  try { sendConfiguredPortalNotice_("receivedSpare","Received Spare Update","Received spare entry submitted by "+String(s.name||s.email)+". Items: "+items.map(function(x){return x.itemName+" ("+x.qty+")";}).join(", ")+". Received against: "+receivedAgainst+". Ticket: "+ticketId+"."); } catch(mailError) { Logger.log("Received Spare notification failed: "+mailError.message); }
   return{success:true,message:items.length+" received spare item(s) submitted successfully."};
 }
 
@@ -5065,6 +5125,8 @@ function ensurePVCBeltConsumedSheet_() {
 }
 
 function savePVCBeltReceived(sessionId, data) {
+  requirePortalPermission_(sessionId, "spareParts", "create");
+
   const user = validateSession_(sessionId);
   if (!user) return { success: false, message: "Session expired. Please login again." };
   data = data || {};
@@ -5080,10 +5142,13 @@ function savePVCBeltReceived(sessionId, data) {
   const sh = ensurePVCBeltReceivedSheet_();
   sh.appendRow([new Date(), dt, beltType, size, qty, String(user.email || ""), String(user.name || "")]);
   SpreadsheetApp.flush();
+  try { sendConfiguredPortalNotice_("pvcBelt","PVC Belt Received","PVC belt received entry: "+beltType+", "+size+", Qty "+qty+", Date "+date+", by "+String(user.name||user.email)+"."); } catch(mailError) { Logger.log("PVC belt received notification failed: "+mailError.message); }
   return { success: true, message: "PVC belt received entry saved successfully." };
 }
 
 function savePVCBeltConsumed(sessionId, data) {
+  requirePortalPermission_(sessionId, "spareParts", "create");
+
   const user = validateSession_(sessionId);
   if (!user) return { success: false, message: "Session expired. Please login again." };
   data = data || {};
@@ -5113,6 +5178,7 @@ function savePVCBeltConsumed(sessionId, data) {
   row[headers.indexOf("Recorded By Name")] = String(user.name || "");
   sh.appendRow(headers.map(function (_, i) { return row[i] === undefined ? "" : row[i]; }));
   SpreadsheetApp.flush();
+  try { sendConfiguredPortalNotice_("pvcBelt","PVC Belt Consumed","PVC belt consumed entry: "+beltType+", Station "+stationNo+", "+usedIn+", Qty "+qty+", Ticket "+ticketId+", Date "+date+", by "+String(user.name||user.email)+"."); } catch(mailError) { Logger.log("PVC belt consumed notification failed: "+mailError.message); }
   return { success: true, message: "PVC belt consumed entry saved successfully." };
 }
 
@@ -5186,7 +5252,9 @@ function getPVCBeltRecords(sessionId, months) {
 }
 
 function ensureScheduledDowntimeSheet_(){const ss=SpreadsheetApp.getActiveSpreadsheet();let sh=ss.getSheetByName(SCHEDULED_DOWNTIME_SHEET_NAME);const h=["Timestamp","Date","From Time","To Time","Ticket No.","Work Details","Work Done By","Duration (hrs)"];if(!sh)sh=ss.insertSheet(SCHEDULED_DOWNTIME_SHEET_NAME);if(sh.getLastRow()===0)sh.getRange(1,1,1,h.length).setValues([h]);else{const cur=sh.getRange(1,1,1,Math.max(sh.getLastColumn(),h.length)).getValues()[0];h.forEach(function(v,i){if(!String(cur[i]||"").trim())sh.getRange(1,i+1).setValue(v);});}return sh;}
-function saveScheduledDowntime(sessionId,data){const s=validateSession_(sessionId);if(!s)return{success:false,message:"Session expired. Please login again."};data=data||{};const d=String(data.date||"").trim(),ticket=String(data.ticketNo||"").trim(),ft=String(data.fromTime||"").trim(),tt=String(data.toTime||"").trim(),work=String(data.workDetails||"").trim(),by=String(data.workDoneBy||"").trim();if(!d||!ticket||!ft||!tt||!work||!by)return{success:false,message:"Date, Ticket No., From Time, To Time, Work Details and Work Done By are required."};const st=new Date(d+"T"+ft),en=new Date(d+"T"+tt);if(isNaN(st)||isNaN(en)||en<=st)return{success:false,message:"To Time must be after From Time."};const h=(en-st)/3600000;ensureScheduledDowntimeSheet_().getRange(ensureScheduledDowntimeSheet_().getLastRow()+1,1,1,8).setValues([[new Date(),new Date(d+"T00:00:00"),st,en,ticket,work,by,h]]);return{success:true,message:"Scheduled downtime saved successfully."};}
+function saveScheduledDowntime(sessionId,data){
+  requirePortalPermission_(sessionId, "maintenance", "create");
+const s=validateSession_(sessionId);if(!s)return{success:false,message:"Session expired. Please login again."};data=data||{};const d=String(data.date||"").trim(),ticket=String(data.ticketNo||"").trim(),ft=String(data.fromTime||"").trim(),tt=String(data.toTime||"").trim(),work=String(data.workDetails||"").trim(),by=String(data.workDoneBy||"").trim();if(!d||!ticket||!ft||!tt||!work||!by)return{success:false,message:"Date, Ticket No., From Time, To Time, Work Details and Work Done By are required."};const st=new Date(d+"T"+ft),en=new Date(d+"T"+tt);if(isNaN(st)||isNaN(en)||en<=st)return{success:false,message:"To Time must be after From Time."};const h=(en-st)/3600000;ensureScheduledDowntimeSheet_().getRange(ensureScheduledDowntimeSheet_().getLastRow()+1,1,1,8).setValues([[new Date(),new Date(d+"T00:00:00"),st,en,ticket,work,by,h]]);try{sendConfiguredPortalNotice_("scheduledDowntime","Scheduled Downtime Activity","Scheduled downtime saved by "+String(s.name||s.email)+". Date: "+d+", Ticket: "+ticket+", Work: "+work+", Duration: "+h+" hours.");}catch(mailError){Logger.log("Scheduled downtime notification failed: "+mailError.message);}return{success:true,message:"Scheduled downtime saved successfully."};}
 function getScheduledDowntimeRecords(sessionId,fromDate,toDate){const s=validateSession_(sessionId);if(!s)return{success:false,message:"Session expired. Please login again.",records:[]};const sh=ensureScheduledDowntimeSheet_();if(sh.getLastRow()<2)return{success:true,records:[]};let rs=null,re=null;if(fromDate&&toDate){const a=String(fromDate).split("-"),b=String(toDate).split("-");if(a.length===3&&b.length===3){rs=new Date(+a[0],+a[1]-1,+a[2]);re=new Date(+b[0],+b[1]-1,+b[2]+1);}}const tz=Session.getScriptTimeZone()||"Asia/Kolkata",out=[];sh.getRange(2,1,sh.getLastRow()-1,8).getValues().forEach(function(r){const d=r[1] instanceof Date?r[1]:null;if(!d)return;if(rs&&re&&(d<rs||d>=re))return;out.push({date:Utilities.formatDate(d,tz,"dd-MM-yyyy"),ticketNo:String(r[4]||""),fromTime:r[2]instanceof Date?Utilities.formatDate(r[2],tz,"HH:mm"):String(r[2]||""),toTime:r[3]instanceof Date?Utilities.formatDate(r[3],tz,"HH:mm"):String(r[3]||""),duration:Number(r[7]||0).toFixed(2),workDoneBy:String(r[6]||""),workDetails:String(r[5]||"")});});out.reverse();return{success:true,records:out.slice(0,500)};}
 // =========================================================
 // NETLIFY API GATEWAY
@@ -5270,4 +5338,324 @@ function apiJson_(payload) {
     .setMimeType(
       ContentService.MimeType.JSON
     );
+}
+
+// =========================================================
+// PM CHECKLIST SOURCE INTEGRATION + T-3004 ROSTER
+// =========================================================
+const PM_CHECKLIST_SPREADSHEET_ID_ = "1T6ZAPjDngICXtm2Cus-iihj1RzyM4FH041-j2ndLeRA";
+const PM_CHECKLIST_SHEET_GID_URL_ = "https://docs.google.com/spreadsheets/d/1T6ZAPjDngICXtm2Cus-iihj1RzyM4FH041-j2ndLeRA/edit?usp=sharing";
+const T3004_ROSTER_SPREADSHEET_ID_ = "11MzzsLiYf6L2CIrRU-FgBC5Y-wKlGoPrVZZbnvn5Okc";
+const T3004_ROSTER_GID_ = 1314673857;
+
+function portalRequireSession_(sessionId) {
+  const session = validateSession_(sessionId);
+  if (!session) throw new Error("Session expired. Please login again.");
+  return session;
+}
+function pmNormHeader_(value) {
+  return String(value == null ? "" : value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+function pmFindHeader_(headers, candidates) {
+  const norm = headers.map(pmNormHeader_);
+  for (let i=0;i<candidates.length;i++) {
+    const wanted=pmNormHeader_(candidates[i]);
+    let idx=norm.indexOf(wanted);
+    if(idx>=0)return idx;
+    idx=norm.findIndex(function(h){return h && (h.indexOf(wanted)>=0 || wanted.indexOf(h)>=0);});
+    if(idx>=0)return idx;
+  }
+  return -1;
+}
+function pmDateISO_(value) {
+  if (!value) return "";
+  if (!(value instanceof Date) && !/^\\d{4}-\\d{1,2}-\\d{1,2}$/.test(String(value).trim()) && !/^\\d{1,2}[\\/-]\\d{1,2}[\\/-]\\d{2,4}$/.test(String(value).trim())) return "";
+  const d = value instanceof Date ? value : new Date(value);
+  if (isNaN(d.getTime())) return "";
+  return Utilities.formatDate(d, Session.getScriptTimeZone() || "Asia/Kolkata", "yyyy-MM-dd");
+}
+function getPMChecklist(sessionId) {
+  requirePortalPermission_(sessionId,"maintenance","view");
+  const ss=SpreadsheetApp.openById(PM_CHECKLIST_SPREADSHEET_ID_);
+  const sheets=ss.getSheets();
+  let sheet=null, headerRow=0, values=null, headers=null;
+  for(let s=0;s<sheets.length;s++){
+    const sh=sheets[s], data=sh.getDataRange().getValues();
+    const limit=Math.min(data.length,30);
+    for(let r=0;r<limit;r++){
+      const h=data[r].map(pmNormHeader_);
+      if(h.some(function(x){return x==="module";}) && h.some(function(x){return x==="component";}) && h.some(function(x){return x==="checkpoint" || x==="check point";})){
+        sheet=sh;headerRow=r+1;values=data;headers=data[r];break;
+      }
+    }
+    if(sheet)break;
+  }
+  if(!sheet) return {success:false,message:"Could not locate a PM header row containing Module, Component and CheckPoint in the source spreadsheet."};
+  const ix={
+    module:pmFindHeader_(headers,["Module"]),component:pmFindHeader_(headers,["Component"]),
+    checkpoint:pmFindHeader_(headers,["CheckPoint","Check Point"]),frequency:pmFindHeader_(headers,["Frequency"]),
+    method:pmFindHeader_(headers,["Inspection Method"]),correction:pmFindHeader_(headers,["Correction method"]),
+    condition:pmFindHeader_(headers,["Condition"]),issue:pmFindHeader_(headers,["Issue Description"]),
+    eta:pmFindHeader_(headers,["ETA","Next Planned Date","Next Planned","Planned Date"]),
+    critical:pmFindHeader_(headers,["Critical Issue"]),doneBy:pmFindHeader_(headers,["Done By"])
+  };
+  const today=Utilities.formatDate(new Date(),Session.getScriptTimeZone()||"Asia/Kolkata","yyyy-MM-dd");
+  const dateCols=[];
+  headers.forEach(function(h,i){const d=pmDateISO_(h);if(d)dateCols.push({col:i,date:d});});
+  const rows=[];
+  for(let r=headerRow;r<values.length;r++){
+    const row=values[r];
+    const module=ix.module>=0?row[ix.module]:"",component=ix.component>=0?row[ix.component]:"",checkpoint=ix.checkpoint>=0?row[ix.checkpoint]:"";
+    if(!String(module||"").trim()&&!String(component||"").trim()&&!String(checkpoint||"").trim())continue;
+    let dueDate="";
+    const frequency=ix.frequency>=0?String(row[ix.frequency]||"").trim():"";
+    const exact=dateCols.find(function(x){return x.date===today;});
+    const scheduledDates=dateCols.filter(function(x){return x.date>=today && String(row[x.col]||"").trim()!=="";}).sort(function(a,b){return a.date.localeCompare(b.date);});
+    if(exact && (String(frequency).toLowerCase()==="daily" || String(row[exact.col]||"").trim()!=="")) dueDate=today;
+    else if(scheduledDates.length) dueDate=scheduledDates[0].date;
+    else if(String(frequency).toLowerCase()==="daily") dueDate=today;
+    const condition=ix.condition>=0?String(row[ix.condition]||"").trim():"";
+    const status=condition.toLowerCase()==="ok"?"Completed":"Open";
+    const eta=ix.eta>=0?row[ix.eta]:"";
+    rows.push({rowNumber:r+1,module:String(module||""),component:String(component||""),checkpoint:String(checkpoint||""),frequency:frequency,dueDate:dueDate,isDueToday:dueDate===today,condition:condition,status:status,issueDescription:ix.issue>=0?String(row[ix.issue]||""):"",correctionMethod:ix.correction>=0?String(row[ix.correction]||""):"",eta:eta instanceof Date?Utilities.formatDate(eta,Session.getScriptTimeZone()||"Asia/Kolkata","dd-MMM-yyyy"):String(eta||""),etaISO:pmDateISO_(eta)});
+  }
+  return {success:true,sheetName:sheet.getName(),headerRow:headerRow,rows:rows};
+}
+function savePMChecklistRow(sessionId,rowNumber,condition,eta) {
+  const session=requirePortalPermission_(sessionId,"maintenance","edit");
+  const rowNum=Number(rowNumber);
+  if(!Number.isInteger(rowNum)||rowNum<2)throw new Error("Invalid PM checklist row.");
+  const cleanCondition=String(condition||"").trim();
+  const cleanEta=String(eta||"").trim();
+  if(["","OK","Not OK"].indexOf(cleanCondition)<0)throw new Error("Condition must be OK or Not OK.");
+  if(cleanCondition!=="OK"&&!cleanEta)throw new Error("ETA / next planned date is required while the task is open.");
+  const ss=SpreadsheetApp.openById(PM_CHECKLIST_SPREADSHEET_ID_);
+  let sh=null, headerRow=0, headers=null;
+  ss.getSheets().some(function(s){const data=s.getDataRange().getValues();for(let r=0;r<Math.min(data.length,30);r++){const h=data[r].map(pmNormHeader_);if(h.indexOf("module")>=0&&h.indexOf("component")>=0&&(h.indexOf("checkpoint")>=0||h.indexOf("check point")>=0)){sh=s;headerRow=r+1;headers=data[r];return true;}}return false;});
+  if(!sh)throw new Error("PM header row not found.");
+  if(rowNum<=headerRow)throw new Error("Selected row is not a task row.");
+  const ci=pmFindHeader_(headers,["Condition"]);
+  if(ci<0)throw new Error("Condition column not found in PM source sheet.");
+  sh.getRange(rowNum,ci+1).setValue(cleanCondition);
+  let ei=pmFindHeader_(headers,["ETA","Next Planned Date","Next Planned","Planned Date"]);
+  if(ei<0){ei=headers.length;sh.getRange(headerRow,ei+1).setValue("ETA / Next Planned Date");}
+  sh.getRange(rowNum,ei+1).setValue(cleanEta?new Date(cleanEta+"T12:00:00"): "");
+  try { const pmEventKey=cleanCondition==="OK"?"pmWorkCompleted":"pmWorkOpen"; sendConfiguredPortalNotice_(pmEventKey,cleanCondition==="OK"?"PM Work Completed":"PM Work Open / Pending","Task row "+rowNum+" updated by "+String(session.name||session.email)+". Condition: "+(cleanCondition||"Open")+". ETA: "+(cleanEta||"Not set")+"."); } catch(mailError) { Logger.log("PM notification failed: "+mailError.message); }
+  return {success:true,message:"PM checklist updated in source sheet."};
+}
+function getT3004ShiftRoster(sessionId) {
+  requirePortalPermission_(sessionId,"shiftRoster","view");
+  const ss=SpreadsheetApp.openById(T3004_ROSTER_SPREADSHEET_ID_);
+  let sh=null;
+  ss.getSheets().some(function(s){if(String(s.getName()).toLowerCase()==="t3004"||String(s.getName()).toLowerCase()==="t-3004"){sh=s;return true;}return false;});
+  if(!sh) sh=ss.getSheets().find(function(s){return s.getSheetId()===T3004_ROSTER_GID_;});
+  if(!sh) return {success:false,message:"T3004 roster tab not found. Check sheet tab name or configured GID."};
+  const data=sh.getDataRange().getDisplayValues();
+  let hr=-1, empIdx=-1, nameIdx=-1, streamIdx=-1;
+  for(let r=0;r<Math.min(data.length,25);r++){
+    const row=data[r].map(pmNormHeader_);
+    const e=row.findIndex(function(x){return x==="emp id"||x==="employee id"||x==="emp no"||x==="employee no";});
+    const n=row.findIndex(function(x){return x==="name"||x==="employee name";});
+    const st=row.findIndex(function(x){return x==="stream"||x==="department";});
+    if(e>=0&&n>=0){hr=r;empIdx=e;nameIdx=n;streamIdx=st;break;}
+  }
+  if(hr<0)return {success:false,message:"Roster header row not found (expected EMP ID and Name)."};
+  const headers=data[hr].map(function(v){return String(v||"").trim();});
+  // Date/month labels may occupy several rows above the employee header; resolve them dynamically.
+  const headerStart=Math.max(0,hr-8);
+  let detectedMonth=null, detectedYear=null;
+  for(let r=headerStart;r<=hr;r++){
+    for(let c=0;c<data[r].length;c++){
+      const cell=String(data[r][c]||"").trim();
+      const parsed=new Date(cell);
+      if(cell && isNaN(Number(cell)) && !isNaN(parsed.getTime()) && /[A-Za-z]/.test(cell) && parsed.getFullYear()>2000){
+        detectedMonth=parsed.getMonth();detectedYear=parsed.getFullYear();
+      }
+    }
+  }
+  if(detectedMonth===null){detectedMonth=new Date().getMonth();detectedYear=new Date().getFullYear();}
+  for(let c=0;c<headers.length;c++){
+    if(c<=Math.max(empIdx,nameIdx,streamIdx))continue;
+    let candidate=headers[c];
+    if(!candidate){
+      for(let r=hr-1;r>=headerStart;r--){const v=String(data[r][c]||"").trim();if(v){candidate=v;break;}}
+    }
+    if(/^\\d{1,2}$/.test(candidate)){
+      const day=Number(candidate);
+      if(day>=1&&day<=31)headers[c]=Utilities.formatDate(new Date(detectedYear,detectedMonth,day),Session.getScriptTimeZone()||"Asia/Kolkata","dd-MMM-yyyy");
+    } else if(candidate && /^\\d{1,2}[\\/-]\\d{1,2}([\\/-]\\d{2,4})?$/.test(candidate)){
+      const parsedDate=new Date(candidate);
+      if(!isNaN(parsedDate.getTime()))headers[c]=Utilities.formatDate(parsedDate,Session.getScriptTimeZone()||"Asia/Kolkata","dd-MMM-yyyy");
+    } else if(candidate && !headers[c]) headers[c]=candidate;
+  }
+  const rows=[];
+  for(let r=hr+1;r<data.length;r++){
+    const row=data[r];
+    if(!String(row[empIdx]||"").trim()&&!String(row[nameIdx]||"").trim())continue;
+    if(!String(row[nameIdx]||"").trim())continue;
+    if(streamIdx>=0 && !String(row[streamIdx]||"").trim())continue;
+    rows.push(row);
+  }
+  const monthLabel=Utilities.formatDate(new Date(),Session.getScriptTimeZone()||"Asia/Kolkata","MMMM yyyy");
+  return {success:true,monthLabel:monthLabel,headers:headers,rows:rows};
+}
+function sendConfiguredPortalNotice_(activityKey,subject,body) {
+  const cfg=getActivityNotificationConfig_()[activityKey];
+  if(!cfg||!cfg.enabled||cfg.mode==="off")return;
+  const recipients=getConfiguredEmailRecipients_(activityKey);
+  if(!recipients.to||!recipients.to.length)return;
+  MailApp.sendEmail({to:recipients.to.join(","),cc:(recipients.cc||[]).join(","),subject:subject,body:body});
+}
+
+
+// =========================================================
+// ROLE DEFAULTS + PER-USER PERMISSION OVERRIDES
+// =========================================================
+const PORTAL_PERMISSION_KEY_ = "PORTAL_PERMISSION_MATRIX_V1";
+const PORTAL_PERMISSION_MODULES_ = ["dashboard","maintenance","spareParts","shiftRoster","settings"];
+const PORTAL_PERMISSION_ACTIONS_ = ["view","create","edit","delete","approveReject","adminSettings"];
+function portalDefaultPermissionMatrix_() {
+  const admin={}, operator={};
+  PORTAL_PERMISSION_MODULES_.forEach(function(m){
+    admin[m]={};operator[m]={};
+    PORTAL_PERMISSION_ACTIONS_.forEach(function(a){
+      admin[m][a]=true;
+      operator[m][a]=(a==="view"||a==="create"||a==="edit") && m!=="settings";
+    });
+  });
+  return {roles:{Admin:admin,Operator:operator},users:{}};
+}
+function getPortalPermissionMatrix(sessionId) {
+  requireAdminSession_(sessionId);
+  const raw=PropertiesService.getScriptProperties().getProperty(PORTAL_PERMISSION_KEY_);
+  let saved={};
+  try{saved=raw?JSON.parse(raw):{};}catch(e){saved={};}
+  const defaults=portalDefaultPermissionMatrix_();
+  const result={roles:defaults.roles,users:{}};
+  PORTAL_PERMISSION_MODULES_.forEach(function(m){
+    ["Admin","Operator"].forEach(function(role){
+      if(saved.roles&&saved.roles[role]&&saved.roles[role][m]){
+        PORTAL_PERMISSION_ACTIONS_.forEach(function(a){
+          if(typeof saved.roles[role][m][a]==="boolean")result.roles[role][m][a]=saved.roles[role][m][a];
+        });
+      }
+    });
+  });
+  Object.keys(saved.users||{}).forEach(function(email){
+    const cleanEmail=String(email).trim().toLowerCase();
+    if(!cleanEmail)return;
+    result.users[cleanEmail]={};
+    PORTAL_PERMISSION_MODULES_.forEach(function(m){
+      if(saved.users[email]&&saved.users[email][m]){
+        result.users[cleanEmail][m]={};
+        PORTAL_PERMISSION_ACTIONS_.forEach(function(a){
+          if(typeof saved.users[email][m][a]==="boolean")result.users[cleanEmail][m][a]=saved.users[email][m][a];
+        });
+      }
+    });
+  });
+  return result;
+}
+function savePortalPermissionMatrix(sessionId,matrix) {
+  requireAdminSession_(sessionId);
+  if(!matrix||typeof matrix!=="object"||!matrix.roles)throw new Error("Permission matrix is required.");
+  const clean=portalDefaultPermissionMatrix_();
+  ["Admin","Operator"].forEach(function(role){
+    PORTAL_PERMISSION_MODULES_.forEach(function(m){
+      PORTAL_PERMISSION_ACTIONS_.forEach(function(a){
+        if(matrix.roles[role]&&matrix.roles[role][m]&&typeof matrix.roles[role][m][a]==="boolean")clean.roles[role][m][a]=matrix.roles[role][m][a];
+      });
+    });
+  });
+  Object.keys(matrix.users||{}).forEach(function(email){
+    const e=String(email||"").trim().toLowerCase();
+    if(!isValidEmail_(e))throw new Error("Invalid override email: "+e);
+    clean.users[e]={};
+    PORTAL_PERMISSION_MODULES_.forEach(function(m){
+      if(!matrix.users[email]||!matrix.users[email][m])return;
+      clean.users[e][m]={};
+      PORTAL_PERMISSION_ACTIONS_.forEach(function(a){
+        if(typeof matrix.users[email][m][a]==="boolean")clean.users[e][m][a]=matrix.users[email][m][a];
+      });
+    });
+  });
+  PropertiesService.getScriptProperties().setProperty(PORTAL_PERMISSION_KEY_,JSON.stringify(clean));
+  return {success:true,message:"Role defaults and per-user overrides saved."};
+}
+function hasPortalPermission_(session,moduleName,action) {
+  if(!session)return false;
+  const email=String(session.email||"").trim().toLowerCase();
+  const role=String(session.role||"Operator").trim();
+  const matrix=portalDefaultPermissionMatrix_();
+  const raw=PropertiesService.getScriptProperties().getProperty(PORTAL_PERMISSION_KEY_);
+  if(raw){try{const saved=JSON.parse(raw);if(saved.roles)matrix.roles=saved.roles;if(saved.users)matrix.users=saved.users;}catch(e){}}
+  const userOverride=matrix.users&&matrix.users[email]&&matrix.users[email][moduleName];
+  if(userOverride&&typeof userOverride[action]==="boolean")return userOverride[action];
+  const roleMap=matrix.roles&&matrix.roles[role]&&matrix.roles[role][moduleName];
+  if(roleMap&&typeof roleMap[action]==="boolean")return roleMap[action];
+  return false;
+}
+function requirePortalPermission_(sessionId,moduleName,action) {
+  const session=portalRequireSession_(sessionId);
+  if(!hasPortalPermission_(session,moduleName,action))throw new Error("Access denied: permission '"+action+"' is not enabled for "+moduleName+".");
+  return session;
+}
+
+function getCurrentPortalPermissions(sessionId) {
+  const session=portalRequireSession_(sessionId);
+  const result={};
+  PORTAL_PERMISSION_MODULES_.forEach(function(m){
+    result[m]={};
+    PORTAL_PERMISSION_ACTIONS_.forEach(function(a){result[m][a]=hasPortalPermission_(session,m,a);});
+  });
+  return result;
+}
+
+function setupT3004RosterNotificationTrigger(sessionId) {
+  requireAdminSession_(sessionId);
+  const triggers=ScriptApp.getProjectTriggers();
+  const exists=triggers.some(function(t){return t.getHandlerFunction()==="onT3004RosterEdit";});
+  if(!exists)ScriptApp.newTrigger("onT3004RosterEdit").forSpreadsheet(T3004_ROSTER_SPREADSHEET_ID_).onEdit().create();
+  return {success:true,message:exists?"T-3004 roster email trigger is already installed.":"T-3004 roster edit email trigger installed."};
+}
+function onT3004RosterEdit(e) {
+  try {
+    if(!e||!e.range)return;
+    const sh=e.range.getSheet();
+    if(sh.getSheetId()!==T3004_ROSTER_GID_)return;
+    const cfg=getActivityNotificationConfig_()["shiftRoster"];
+    if(!cfg||!cfg.enabled||cfg.mode==="off")return;
+    sendConfiguredPortalNotice_("shiftRoster","T-3004 Shift Roster Changed",
+      "The T-3004 shift roster was edited in Google Sheets. Sheet: "+sh.getName()+
+      ", Cell/range: "+e.range.getA1Notation()+", Editor: "+(Session.getActiveUser().getEmail()||"Google Sheets editor")+
+      (e.oldValue!==undefined?" , Previous value: "+e.oldValue:"")+
+      (e.value!==undefined?" , New value: "+e.value:"")+".");
+  } catch(err) { Logger.log("T-3004 roster edit notification failed: "+err.message); }
+}
+
+function setupPMOverdueNotificationTrigger(sessionId) {
+  requireAdminSession_(sessionId);
+  const triggers=ScriptApp.getProjectTriggers();
+  const exists=triggers.some(function(t){return t.getHandlerFunction()==="sendPMOverdueNotifications";});
+  if(!exists)ScriptApp.newTrigger("sendPMOverdueNotifications").timeBased().everyDays(1).atHour(8).create();
+  return {success:true,message:exists?"Daily PM overdue notification trigger is already installed.":"Daily PM overdue notification trigger installed (around 8 AM script timezone)."};
+}
+function sendPMOverdueNotifications() {
+  try {
+    const ss=SpreadsheetApp.openById(PM_CHECKLIST_SPREADSHEET_ID_);
+    let found=null;
+    ss.getSheets().some(function(sh){const data=sh.getDataRange().getValues();for(let r=0;r<Math.min(data.length,30);r++){const h=data[r].map(pmNormHeader_);if(h.indexOf("module")>=0&&h.indexOf("component")>=0&&(h.indexOf("checkpoint")>=0||h.indexOf("check point")>=0)){found={sheet:sh,row:r+1,values:data,headers:data[r]};return true;}}return false;});
+    if(!found)return;
+    const ixCondition=pmFindHeader_(found.headers,["Condition"]),ixEta=pmFindHeader_(found.headers,["ETA","Next Planned Date","Next Planned","Planned Date"]),ixModule=pmFindHeader_(found.headers,["Module"]),ixComponent=pmFindHeader_(found.headers,["Component"]),ixCheckpoint=pmFindHeader_(found.headers,["CheckPoint","Check Point"]);
+    if(ixEta<0)return;
+    const today=Utilities.formatDate(new Date(),Session.getScriptTimeZone()||"Asia/Kolkata","yyyy-MM-dd");
+    const overdue=[];
+    for(let r=found.row;r<found.values.length;r++){
+      const row=found.values[r], condition=ixCondition>=0?String(row[ixCondition]||"").trim().toLowerCase():"";
+      if(condition==="ok")continue;
+      const eta=pmDateISO_(row[ixEta]);
+      if(eta && eta<today)overdue.push("Row "+(r+1)+": "+String(row[ixModule]||"")+" / "+String(row[ixComponent]||"")+" / "+String(row[ixCheckpoint]||"")+" — ETA "+eta);
+    }
+    if(overdue.length)sendConfiguredPortalNotice_("pmWorkOverdue","PM Work Overdue ("+overdue.length+")",overdue.join("\n"));
+  } catch(err) { Logger.log("PM overdue notification failed: "+err.message); }
 }
