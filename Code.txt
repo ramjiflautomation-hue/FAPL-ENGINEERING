@@ -5002,6 +5002,8 @@ function saveReceivedSpare(sessionId,data){
   }
   if(receivedAgainst==="Material Request"&&!ticketId){
     return{success:false,message:"Request / Ticket ID is required for Material Request."};
+getPMChecklist: getPMChecklist,
+savePMChecklistRow: savePMChecklistRow,
   }
   if(!items.length||items.some(function(x){return !x.itemId||!x.itemName||x.qty<=0;})){
     return{success:false,message:"Please enter valid Item ID, Item Name and Quantity for every item."};
