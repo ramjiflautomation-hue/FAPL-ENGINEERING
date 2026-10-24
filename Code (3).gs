@@ -5294,6 +5294,8 @@ function doPost(e) {
       updateDashboardRequest: updateDashboardRequest,
       updateProblemObservation: updateProblemObservation,
       verifyAdminRecovery: verifyAdminRecovery
+     getPMChecklist: getPMChecklist,
+     savePMChecklistRow: savePMChecklistRow,
     };
 
     if (!handlers[fn]) {
